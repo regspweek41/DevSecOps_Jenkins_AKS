@@ -41,7 +41,7 @@ pipeline {
         stage('Run GitLeaks') {
             steps {
                 // Run GitLeaks
-                sh './gitleaks --path .'
+                sh './gitleaks --path . --config-path=gitleaks.toml -o secret.txt'
             }
         }
         
