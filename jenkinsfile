@@ -1,0 +1,125 @@
+pipeline {
+    agent any
+    tools{
+        jdk  'jdk17'
+        maven  'maven3'
+    }
+    
+    environment{
+        SCANNER_HOME= tool 'sonar-scanner'
+        AZURE_SUBSCRIPTION_ID='491e1121-c626-46e3-98ba-98f9f0434964'
+        AZURE_CLIENT_SECRET='OtB8Q~LRfqbPRZROSxaaLg'
+        AZURE_CLIENT_ID='761b3b42-5a9bc2695072'
+        AZURE_TENANT_ID='2047b1bd-647dac583343'
+        CONTAINER_REGISTRY='project231.azurecr.io'
+        RESOURCE_GROUP='AZ-NEW-22'
+        REPO="services"
+        IMAGE_NAME="springboot-app"
+        TAG="latest"
+        TRIVY_REPORT_FILE = 'trivy_report.json'
+        azure_sp_id = credentials('azure-sp-id')
+        AKS_CLUSTER_NAME = 'aks-dev'
+        RESOURCE_GROUP_AKS = 'ADO-201'
+    }
+    
+    stages {
+        stage('Git Checkout') {
+            steps {
+                git branch: 'main', credentialsId: 'azure-repo-id', url: 'https://rkrvritN45PSP@dev.azure.com/rkrvritN45PSP/RVRIT/_git/Mainproject-Repo'
+                
+            }
+        }
+        
+        stage('Install GitLeaks') {
+            steps {
+                // Install GitLeaks
+                sh 'curl -sL https://github.com/zricethezav/gitleaks/releases/download/v7.1.2/gitleaks-linux-amd64 -o gitleaks'
+                sh 'chmod +x gitleaks'
+            }
+        }
+
+        stage('Run GitLeaks') {
+            steps {
+                // Run GitLeaks
+                sh './gitleaks --path .'
+            }
+        }
+        
+        stage('COMPILE') {
+            steps {
+                sh "mvn clean compile -DskipTests=true"
+            }
+        }
+        
+        stage('OWASP Scan') {
+            steps {
+                dependencyCheck additionalArguments: '--scan ./ ', odcInstallation: 'owasp'
+                dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+            }
+        }
+        
+        
+        stage('Sonarqube') {
+            steps {
+                withSonarQubeEnv('sonar-server'){
+                  sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=Mainproject-Repo \
+                  -Dsonar.java.binaries=. \
+                  -Dsonar.projectKey=Mainproject-Repo '''
+              }
+            }
+        }
+        
+        
+        
+        stage('Build') {
+            steps {
+                sh "mvn clean package -DskipTests=true"
+            }
+        }
+        
+       
+        stage('Docker Build & Push') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'myAzureCredential', passwordVariable: 'AZURE_CLIENT_SECRET', usernameVariable: 'AZURE_CLIENT_ID')]) {
+                            sh 'az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET -t $AZURE_TENANT_ID'
+                            sh 'az account set -s $AZURE_SUBSCRIPTION_ID'
+                            sh 'az acr login --name $CONTAINER_REGISTRY --resource-group $RESOURCE_GROUP'
+                            sh 'docker build -t service-backend .'
+                            sh "docker tag  service-backend $CONTAINER_REGISTRY/$REPO/$IMAGE_NAME:$TAG"
+                            sh "docker push $CONTAINER_REGISTRY/$REPO/$IMAGE_NAME:$TAG"
+                }
+            }
+        }
+        
+         stage("TRIVY"){
+            steps{
+                 sh " trivy --format json --output ${TRIVY_REPORT_FILE} image $CONTAINER_REGISTRY/$REPO/$IMAGE_NAME:$TAG"
+            }
+         }
+        
+        stage('Docker Image Pull & Deploy') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'myAzureCredential', passwordVariable: 'AZURE_CLIENT_SECRET', usernameVariable: 'AZURE_CLIENT_ID')]) {
+                            sh 'az login --service-principal -u $AZURE_CLIENT_ID -p $AZURE_CLIENT_SECRET -t $AZURE_TENANT_ID'
+                            sh 'az account set -s $AZURE_SUBSCRIPTION_ID'
+                            sh 'az acr login --name $CONTAINER_REGISTRY --resource-group $RESOURCE_GROUP'
+                            sh 'docker pull $CONTAINER_REGISTRY/$REPO/$IMAGE_NAME:$TAG'
+                            sh "docker run -d -p 8081:8081 $CONTAINER_REGISTRY/$REPO/$IMAGE_NAME:$TAG"
+                }
+            }
+        }
+        
+        stage ("Deploy to K8S") {
+            steps {
+                withKubeConfig(caCertificate: 'CRUswbTM2Y1RU3JFNnFkQUR3LzIxUlI5Cm4zQ0M1ZSnNKemZQWkcxZS8wMlRmTTgzOVRSMHRuZjduTTUzNE43MWh6UWxrQXNBZHZ1OS9ubzNoZkpIQWhmcG0KNXYXJHbC9Kd0JYL0JjV3ZvZWZaRXZoMnBJREFGWUJWOGwrdldIWGhZQUE1UUhjYm9FMFIvClFwMWd5dHhjcmJ6YnVJZU1vT1lPR3pyOWlJeXRwNEhPcmh6Ukp5OVR2b3Ixa2lxMzdMakRWbHNZQVFaOFVtUjgKSlo0', clusterName: 'aks-dev', contextName: 'aks-dev', credentialsId: 'kube-id', namespace: 'default', restrictKubeConfigAccess: false, serverUrl: 'https://aks-dev-dns-80n481je.84d3378f-fbcd-4afb-8936-a627cd606f05.privatelink.southeastasia.azmk8s.io:443'){                
+                    
+                    sh 'sed -i "s/api_env/azure-uat/g" middleware-uat.yaml'
+                    sh 'kubectl apply -f middleware-uat.yaml'
+                }
+            }
+        }
+        
+
+        }
+        
+}
